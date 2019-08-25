@@ -1,0 +1,256 @@
+---
+title: "ABCD_Workshop_Univariate_Analyses"
+author: "Adam Pines"
+date: "8/23/2019"
+output: html_document
+---
+
+```{r}
+### Get your initial data organization variables set up for subsetting and indexing ###
+
+# Load in initial dataset to measure dataframe dimensions
+cbcl<-read.delim('/Users/pinesa/impulsivity/abcd_cbcl01.txt')
+
+# Get only one timepoint for dataset, avoid duplicated PT names
+cbcl_bl<-subset(cbcl,cbcl$eventname=='baseline_year_1_arm_1')
+
+# Divide sample into training and testing, set seed for replicability.
+
+set.seed(123)
+names<-unique(cbcl$src_subject_id)
+train_ind <- sample(seq_len(11876), size = 5938)
+
+# Make training and testing set mutually exclusive
+train <- names[train_ind]
+test <- names[-train_ind]
+
+# Ensure there's no overlap
+paste(length(intersect(train,test)), "names in common")
+
+# Save training and testing set for future reference
+write.csv(train, '/Users/pinesa/training.csv')
+# reload to ensure it will work the same in future
+train<-read.csv('/Users/pinesa/training.csv')
+
+# Change variable name to be equivalent with cbcl
+train$src_subject_id<-train[,2]
+
+# Subset item of interest to only include training participants
+cbcl_sub<-merge(cbcl_bl,train, by = 'src_subject_id' )
+
+# Check size to make sure the dataset halved
+print(dim(cbcl_sub))
+```
+
+```{r}
+# Time to stress out your computer with heavy csv loading, there are packages not included in this .rmd that can speed this up. #
+
+# impulsivity self-report metrics
+upps<-read.delim('/Users/pinesa/impulsivity/abcd_upps01.txt')
+# Subset to just include baseline time point
+upps_bl<-subset(upps,upps$eventname=='baseline_year_1_arm_1')
+# Subset to just training ID
+upps_sub<-merge(upps_bl,train, by = 'src_subject_id' )
+# Broad stroke to remove some individuals with missing values early on
+upps_df<-upps_sub[upps_sub$upps20_y!="",]
+
+# impulsivity behavior metrics
+sst<-read.delim('/Users/pinesa/sst/abcd_sst02.txt')
+sst_bl<-subset(sst,sst$eventname=='baseline_year_1_arm_1')
+sst_sub<-merge(sst_bl,train, by = 'src_subject_id' )
+sst_df<-sst_sub[sst_sub$tfmri_sst_all_beh_crgo_rt!="",]
+
+# sst beta weights - quote added because of EOF within quoted string redtext?
+sstmr<-read.delim('/Users/pinesa/impulsandbrain/mrisst02.txt')
+sstmr_bl<-subset(sstmr,sstmr$eventname=='baseline_year_1_arm_1')
+sstmr_sub<-merge(sstmr_bl,train, by = 'src_subject_id' )
+sstmr_df<-sstmr_sub[sstmr_sub$tfmri_sa_beta_tr!="",]
+
+# network cor betra weights
+net<-read.delim('/Users/pinesa/impulsandbrain/mrirscor02.txt')
+net_bl<-subset(net,net$eventname=='baseline_year_1_arm_1')
+net_sub<-merge(net_bl,train, by = 'src_subject_id' )
+net_df<-net_sub[net_sub$rsfmri_cor_ngd_au_scs_plrh!="",]
+
+# RSI metrics
+rsi<-read.delim('/Users/pinesa/impulsandbrain/mri_rsi_p202.txt')
+rsi_bl<-subset(rsi,rsi$eventname=='baseline_year_1_arm_1')
+rsi_sub<-merge(rsi_bl,train, by = 'src_subject_id' )
+rsi_df<-rsi_sub[rsi_sub$dmri_rsin0gm_cdk_loboflh!="",]
+
+# More RSI metrics
+rsi1<-read.delim('/Users/pinesa/rsi2/mri_rsi_p102.txt')
+rsi1_bl<-subset(rsi1,rsi1$eventname=='baseline_year_1_arm_1')
+rsi1_sub<-merge(rsi1_bl,train, by = 'src_subject_id' )
+rsi1_df<-rsi1_sub[rsi1_sub$dmri_rsints2wm_cdk_insularh!="",]
+
+# DTI metrics
+dti<-read.delim('/Users/pinesa/impulsandbrain/abcd_dti_p101.txt')
+dti_bl<-subset(dti,dti$eventname=='baseline_year_1_arm_1')
+dti_sub<-merge(dti_bl,train, by = 'src_subject_id' )
+dti_df<-dti_sub[dti_sub$dmri_dtifa_fiberat_cgcrh!="",]
+
+# Struct metrics
+smr1<-read.delim('/Users/pinesa/ABCDFixRelease/abcd_smrip101.txt')
+smr1_bl<-subset(smr1,smr1$eventname=='baseline_year_1_arm_1')
+smr1_sub<-merge(smr1_bl,train, by = 'src_subject_id' )
+smr1_df<-smr1_sub[smr1_sub$smri_thick_cdk_pclh!="",]
+
+smr2<-read.delim('/Users/pinesa/ABCDFixRelease/abcd_smrip201.txt')
+smr2_bl<-subset(smr2,smr2$eventname=='baseline_year_1_arm_1')
+smr2_sub<-merge(smr2_bl,train, by = 'src_subject_id' )
+smr2_df<-smr2_sub[smr2_sub$smri_t2ww02_cdk_pobalislh!="",]
+
+# tfss
+tfss<-read.delim('/Users/pinesa/Downloads/abcd_tfsstabwdp101.txt')
+tfss_bl<-subset(tfss,tfss$eventname=='baseline_year_1_arm_1')
+tfss_sub<-merge(tfss_bl,train, by = 'src_subject_id' )
+tfss_df<-tfss_sub[tfss_sub$smri_t2ww02_cdk_pobalislh!="",]
+
+# Psychometrics summary scores
+psych<-read.csv('/Users/pinesa/Downloads/MHdata.csv')
+```
+
+```{r}
+# merge em all #
+paste("upps:",dim(upps_df)[1])
+paste("sst behavior",dim(sst_df)[1])
+paste("sst beta weights",dim(sstmr_df)[1])
+paste("network subcortical relations",dim(net_df)[1])
+paste("rsi metrics", dim(rsi_df)[1])
+paste("dti metrics", dim(dti_df)[1])
+paste("structural metrics", dim(smr1_df)[1])
+paste("structural metrics2", dim(smr2_df)[1])
+paste("psych measures", dim(psych)[1])
+
+# Merge Sets
+df<-merge(upps_df,sst_df,by = 'src_subject_id')
+df<-merge(df,sstmr_df,by = 'src_subject_id')
+df<-merge(df,net_df,by = 'src_subject_id')
+df<-merge(df,rsi_df,by = 'src_subject_id')
+df<-merge(df,dti_df,by = 'src_subject_id')
+df<-merge(df,smr1_df,by = 'src_subject_id')
+df<-merge(df,smr2_df,by = 'src_subject_id')
+df<-merge(df,psych,by = 'src_subject_id')
+df<-merge(df,rsi1_df,by='src_subject_id')
+df<-merge(df,tfss,by='src_subject_id')
+paste("merged dataset size:",dim(df)[1])
+
+```
+```{r}
+# Mass univariate correlations #
+2
+# read in mrivars, a list of variables to be correlated
+mrvars<-read.csv('~/Desktop/all_vars.csv', header=FALSE)
+# for 56 variables of interest
+var_of_int<-paste(mrvars[1:54,],sep = "")
+
+# subset the data frame to only include variables of interest to make R fast again. Future operations reference this subsetted data frame.
+
+subdf<-df[(names(df)) %in% var_of_int]
+
+# Another broad stroke to remove missing values based on eliminating subjects with missing values for one variable (tfmri_sacsvcg_bcdk_cdacgelh)
+subdf<-subdf[subdf$tfmri_sacsvcg_bcdk_cdacgelh!="",]
+
+# Save the subset for later so you can just load it in on its own
+write.csv(subdf,'subdf.csv')
+
+# Create an empty matrix to populate with correlations
+# 56 MR variables and 7 psychological constructs of interest here
+correlations_imp<-matrix(ncol = 7, nrow = 54)
+
+# for(give me) loops for individual psychological constructs
+
+# negative urgency
+
+# for i in number of variables of interest
+for (i in 1:length(rownames(mrvars))) {
+  # isolate immediate variable of interest into format that R likes
+  var_of_int<-paste("subdf$",mrvars[i,1],sep = "")
+  # a as a placeholder for immediate var of interest
+  a<-eval(parse(text = var_of_int))
+  # if statement to catch problems in importing the variables of interest, go back and check which variable is not what it should be if you get this message in your data frame
+  if (is.null(a)) {
+    print("I'm afraid I can't let you do that, Adam")
+  } else {
+    # as.num(as.char) seems to be a quick and dirty defense against R's love for inconveniently converting things to factors
+  b<-as.numeric(as.character(eval(parse(text = var_of_int))))
+  a<-b
+  univ_cor<-cor.test(subdf$upps_y_ss_negative_urgency,a)
+  paste(var_of_int)->correlations_imp[i,1]
+  # change between univ_cor[3] and univ_cor[4] for pvals or pearsons
+  as.numeric(univ_cor[3])->correlations_imp[i,2] }
+}
+
+# positive urgency
+for (i in 1:length(rownames(mrvars))) {
+  var_of_int<-paste("subdf$",mrvars[i,1],sep = "")
+  a<-eval(parse(text = var_of_int))
+  if (is.null(a)) {
+    print("I'm afraid I can't let you do that, Adam")
+  } else {
+  b<-as.numeric(as.character(eval(parse(text = var_of_int))))
+  a<-b
+  univ_cor<-cor.test(subdf$upps_y_ss_positive_urgency,a)
+  paste(var_of_int)->correlations_imp[i,1]
+  as.numeric(univ_cor[3])->correlations_imp[i,3]  
+  }
+}
+
+# lack_of_planning
+for (i in 1:length(rownames(mrvars))) {
+  var_of_int<-paste("subdf$",mrvars[i,1],sep = "")
+  a<-eval(parse(text = var_of_int))
+  if (is.null(a)) {
+    print("I'm afraid I can't let you do that, Adam")
+  } else {
+  b<-as.numeric(as.character(eval(parse(text = var_of_int))))
+  a<-b
+  univ_cor<-cor.test(subdf$upps_y_ss_lack_of_planning,a)
+  as.numeric(univ_cor[3])->correlations_imp[i,4] }
+}
+
+# sensation seeking
+for (i in 1:length(rownames(mrvars))) {
+  var_of_int<-paste("subdf$",mrvars[i,1],sep = "")
+  a<-eval(parse(text = var_of_int))
+  if (is.null(a)) {
+    print("I'm afraid I can't let you do that, Adam")
+  } else {
+  b<-as.numeric(as.character(eval(parse(text = var_of_int))))
+  a<-b
+  univ_cor<-cor.test(subdf$upps_y_ss_sensation_seeking,a)
+  as.numeric(univ_cor[3])->correlations_imp[i,5] }
+}
+
+# lack of perseverance
+for (i in 1:length(rownames(mrvars))) {
+  var_of_int<-paste("subdf$",mrvars[i,1],sep = "")
+  a<-eval(parse(text = var_of_int))
+  if (is.null(a)) {
+    print("I'm afraid I can't let you do that, Adam")
+  } else {
+  b<-as.numeric(as.character(eval(parse(text = var_of_int))))
+  a<-b
+  univ_cor<-cor.test(subdf$upps_y_ss_lack_of_perseverance,a)
+  as.numeric(univ_cor[3])->correlations_imp[i,6] }
+}
+
+# behavior metric
+for (i in 1:length(rownames(mrvars))) {
+  var_of_int<-paste("subdf$",mrvars[i,1],sep = "")
+  a<-eval(parse(text = var_of_int))
+  if (is.null(a)) {
+    print("I'm afraid I can't let you do that, Adam")
+  } else {
+  b<-as.numeric(as.character(eval(parse(text = var_of_int))))
+  a<-b
+  subdf$tfmri_sst_all_beh_crs_rt<-as.numeric(as.character(subdf$tfmri_sst_all_beh_crs_rt))
+  univ_cor<-cor.test(subdf$tfmri_sst_all_beh_crs_rt,a)
+  as.numeric(univ_cor[3])->correlations_imp[i,7] }
+}
+
+# Save correlations
+correlations_imp[1,]<-c("mrvariable","negative_urgency","positive_urgency","lack_of_planning","sensation_seeking","lack_of_perserverance","stop correct rate")
+write.csv(correlations_imp,"correlations_impulsivity_ps.csv")
+```
