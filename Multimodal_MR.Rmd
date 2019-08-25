@@ -1,0 +1,174 @@
+---
+title: "Multimodal_MR"
+author: "Adam Pines"
+date: "8/25/2019"
+output: html_document
+---
+
+```{r}
+# Struct metrics
+smr1<-read.delim('/Users/pinesa/ABCDFixRelease/abcd_smrip101.txt')
+
+# Subset into training and testing sets
+set.seed(123)
+names<-unique(smr1$src_subject_id)
+train_ind <- sample(seq_len(11876), size = 5938)
+
+# Make training and testing set mutually exclusive
+train <- names[train_ind]
+test <- names[-train_ind]
+
+# Ensure there's no overlap
+paste(length(intersect(train,test)), "names in common")
+
+# Save training and testing set for future reference
+write.csv(train, '/Users/pinesa/training.csv')
+# reload to ensure it will work the same in future
+train<-read.csv('/Users/pinesa/training.csv')
+
+# Change variable name to be equivalent with cbcl
+train$src_subject_id<-train[,2]
+
+smr1_bl<-subset(smr1,smr1$eventname=='baseline_year_1_arm_1')
+smr1_sub<-merge(smr1_bl,train, by = 'src_subject_id' )
+smr1_df<-smr1_sub[smr1_sub$smri_thick_cdk_pclh!="",]
+
+smr2<-read.delim('/Users/pinesa/ABCDFixRelease/abcd_smrip201.txt')
+smr2_bl<-subset(smr2,smr2$eventname=='baseline_year_1_arm_1')
+smr2_sub<-merge(smr2_bl,train, by = 'src_subject_id' )
+smr2_df<-smr2_sub[smr2_sub$smri_t2ww02_cdk_pobalislh!="",]
+
+# temporal variance rsfmri
+rs<-read.delim('/Users/pinesa/ABCDFixRelease/abcd_mrirstv02.txt')
+rs_bl<-subset(rs,rs$eventname=='baseline_year_1_arm_1')
+rs_sub<-merge(rs_bl,train, by = 'src_subject_id' )
+rs_df<-rs_sub[rs_sub$rsfmri_var_cdk_banksstsrh!="",]
+
+# md containing
+md<-read.delim('/Users/pinesa/ABCDFixRelease/abcd_dmdtifp101.txt')
+md_bl<-subset(md,md$eventname=='baseline_year_1_arm_1')
+md_sub<-merge(md_bl,train, by = 'src_subject_id' )
+md_df<-md_sub[md_sub$dmdtifp1_440!="",]
+```
+
+```{r}
+# Merge data frames
+
+df<-merge(smr2_df,smr1_df,by = 'src_subject_id')
+df<-merge(df,rs_df,by = 'src_subject_id')
+df<-merge(df,md_df,by = 'src_subject_id')
+
+# Print size of each data frame
+paste("structural metrics", dim(smr1_df)[1])
+paste("structural metrics2", dim(smr2_df)[1])
+paste("temporal variance", dim(rs_df)[1])
+paste("mean diffusivity", dim(md_df)[1])
+paste("merged data", dim(df)[1])
+
+```
+
+```{r}
+# pull MR metrics of interest across desikan atlas
+rs_keyword<-c("rsfmri_var_cdk_")
+vol_keyword<-c("smri_vol_cdk_")
+md_keyword<-c("dmdtifp1_4")
+t1_keyword<-c("smri_t1wgray02_cdk_")
+t2_keyword<-c("smri_t2wg02_cdk_")
+
+# Subset data frames to include just variables with keywords
+rs_desk<-df[,grepl(rs_keyword, colnames(df))]
+md_desk<-df[,grepl(md_keyword, colnames(df))]
+vol_desk<-df[,grepl(vol_keyword, colnames(df))]
+t1_desk<-df[,grepl(t1_keyword, colnames(df))]
+t2_desk<-df[,grepl(t2_keyword, colnames(df))]
+
+# Take out lh rh and total metrics for equivalence
+vol_desk<-vol_desk[,1:68]
+t1_desk<-t1_desk[,1:68]
+t2_desk<-t2_desk[,1:68]
+
+# Take out non-desikan from MD (has slightly different layout than other .txt files)
+md_desk<-md_desk[,14:81]
+  
+# Convert to numeric
+for (i in 1:length(colnames(rs_desk))) {
+rs_desk[,colnames(rs_desk)[i]]<-as.numeric(as.character(rs_desk[,colnames(rs_desk)[i]]))}
+
+for (i in 1:length(colnames(vol_desk))) {
+vol_desk[,colnames(vol_desk)[i]]<-as.numeric(as.character(vol_desk[,colnames(vol_desk)[i]]))}
+
+for (i in 1:length(colnames(t1_desk))) {
+t1_desk[,colnames(t1_desk)[i]]<-as.numeric(as.character(t1_desk[,colnames(t1_desk)[i]]))}
+
+for (i in 1:length(colnames(t2_desk))) {
+t2_desk[,colnames(t2_desk)[i]]<-as.numeric(as.character(t2_desk[,colnames(t2_desk)[i]]))}
+
+for (i in 1:length(colnames(md_desk))) {
+md_desk[,colnames(md_desk)[i]]<-as.numeric(as.character(md_desk[,colnames(md_desk)[i]]))}
+
+# Make T1/T2 Map (quick and dirty)
+MM<-t1_desk/t2_desk
+```
+
+```{r}
+# transpose to avoid formatting later
+tmm<-t(MM)
+tvol<-t(vol_desk)
+tmd<-t(md_desk)
+trs<-t(rs_desk)
+
+# Individual level pca
+
+# get number of subjects left
+numsubj<-length(rownames(vol_desk))
+
+# create a placehodler to keep track of missing data
+misssubj<-rep(1,numsubj)
+
+# create placeholders to keep track of variance attributable to each component across individuals
+pc1var<-rep(1,numsubj)
+pc2var<-rep(1,numsubj)
+pc3var<-rep(1,numsubj)
+
+# Run pca on each individuals modalities across regions of interest.
+# How does temporal variance in BOLD, T1/T2 intensity, water diffusion, and structural volume vary across regions of interest? Do these variations tell us about important deviance in individual brains?
+
+for (i in 1:numsubj) {
+  Subj_set<-matrix(ncol = 4, nrow = 68)
+  Subj_set[,1]<-tmm[,i]
+  Subj_set[,2]<-tvol[,i]
+  Subj_set[,3]<-trs[,i]
+  Subj_set[,4]<-tmd[,i]
+  if (anyNA(Subj_set)==TRUE){
+#    commented out this line, but uncommenting will tell you which IDs are missing data in your data frame
+#    print(paste("Subject",df$src_subject_id[i],"has missing values and will be excluded"))
+    misssubj[i]<-df$src_subject_id[i]
+  } else {
+  ex<-prcomp(Subj_set,scale. = TRUE)
+  write.table(ex$x,(paste("~/Desktop/ABCDworkshop/PT_PCAS/",df$src_subject_id[i],".csv",sep="")),col.names=FALSE,row.names = FALSE,sep=",")
+  eigs<-ex$sdev^2
+  pc1var[i]<-eigs[1]/sum(eigs)
+  pc2var[i]<-eigs[2]/sum(eigs)
+  pc3var[i]<-eigs[3]/sum(eigs)
+  
+  }
+
+}
+misssubj[misssubj!=1]
+print(length(misssubj[misssubj!=1]))
+
+# Print out mean variance due to each component
+print(mean((pc1var[pc1var!=1])))
+print(mean((pc2var[pc2var!=1])))
+print(mean((pc3var[pc3var!=1])))
+
+# Just for visualization, 3 and 37 correspond to caudal middle frontal PFC in both hemispheres
+
+# Cool library for pca visualization
+library(pca3d)
+  vec<-paste(rep(1,68))
+  vec[3]<-c(2)
+  vec[37]<-c(3)
+  pca3d(ex,group = vec)
+```
+```
