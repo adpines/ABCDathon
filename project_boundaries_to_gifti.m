@@ -1,72 +1,82 @@
-% flatmap resampling + project grid boundaries back to gifti
-%
-% Part 1: Resample CIFTI timeseries onto regular 2D grid via flatmap
-% Part 2: Map grid rectangle boundaries back to gifti surface vertices
-%         so boundaries can be visualized in native brain space
+% Spherical projection with medial wall rotation
+% Rotates medial wall to pole, then maps to azimuth/elevation grid
+% Part 2 maps grid boundaries back to gifti for visualization in wb_view
 
 addpath(genpath('E:\codelib'))
 
-%% 1. SETUP - Set paths
-flatmap_L_path = 'E:/Downloads/fs_LR.32k.L.flat.surf.gii';
-flatmap_R_path = 'E:/Downloads/fs_LR.32k.R.flat.surf.gii';
+%% 1. SETUP
+sphere_L_path = 'E:/Downloads/fs_LR.32k.L.sphere.surf.gii';
+sphere_R_path = 'E:/Downloads/fs_LR.32k.R.sphere.surf.gii';
 dtseries_path = 'E:/Downloads/sub-s002_ses-V9_task-Resting1NewHB6scan_space-fsLR_den-91k_desc-denoised_bold.dtseries.nii';
 
-% Parameters
-downsample = 2;
-xCord_L = -250:downsample:250;
-yCord_L = -150:downsample:200;
-xCord_R = -270:downsample:230;
-yCord_R = -180:downsample:170;
+% Grid parameters
+downsample = 4;
+azimuth_range = -180:downsample:180;
+elevation_range = -90:downsample:90;
 
 %% 2. LOAD DATA
 fprintf('Loading data...\n');
 data = ft_read_cifti(dtseries_path);
-surf_L = gifti(flatmap_L_path);
-surf_R = gifti(flatmap_R_path);
+surf_L = gifti(sphere_L_path);
+surf_R = gifti(sphere_R_path);
 
 %% 3. PROCESS LEFT HEMISPHERE
 fprintf('\nProcessing left hemisphere...\n');
 
-% Extract positions
+% Get xyz coordinates and timeseries
 x_L = double(surf_L.vertices(:,1));
 y_L = double(surf_L.vertices(:,2));
-
-% Get cortical timeseries data for left hemisphere
+z_L = double(surf_L.vertices(:,3));
 sig_L = data.dtseries(1:length(x_L), :)';  % [timepoints x vertices]
 
-% Remove NaN vertices (medial wall)
-validIdx_L = ~all(isnan(sig_L), 1);
-x_L = x_L(validIdx_L);
-y_L = y_L(validIdx_L);
-sig_L = sig_L(:, validIdx_L);
+% Identify medial wall (NaN vertices)
+medialIdx_L = all(isnan(sig_L), 1);
+fprintf('  Medial wall vertices: %d\n', sum(medialIdx_L));
 
-fprintf('  Valid vertices: %d\n', length(x_L));
+% Find mean direction of medial wall
+medial_dir_L = [mean(x_L(medialIdx_L)); mean(y_L(medialIdx_L)); mean(z_L(medialIdx_L))];
+medial_dir_L = medial_dir_L / norm(medial_dir_L);
+fprintf('  Medial wall direction: [%.3f, %.3f, %.3f]\n', medial_dir_L);
 
-% Create alpha shape boundary
-k_L = alphaShape(x_L, y_L, 4);
-[~, boundary_L] = k_L.boundaryFacets();
+% Calculate rotation to move medial wall to north pole [0, 0, 1]
+north_pole = [0; 0; 1];
+rotation_axis_L = cross(medial_dir_L, north_pole);
+rotation_axis_L = rotation_axis_L / norm(rotation_axis_L);
+rotation_angle_L = acos(dot(medial_dir_L, north_pole));
 
-% Create mask from boundary
-boundary_L_x_idx = (boundary_L(:,1) - min(xCord_L)) / downsample + 1;
-boundary_L_y_idx = (boundary_L(:,2) - min(yCord_L)) / downsample + 1;
+% Build rotation matrix using Rodrigues formula
+K_L = [0, -rotation_axis_L(3), rotation_axis_L(2);
+       rotation_axis_L(3), 0, -rotation_axis_L(1);
+       -rotation_axis_L(2), rotation_axis_L(1), 0];
+R_L = eye(3) + sin(rotation_angle_L)*K_L + (1-cos(rotation_angle_L))*(K_L*K_L);
 
-bw_L = poly2mask(boundary_L_x_idx, boundary_L_y_idx, ...
-                 length(yCord_L), length(xCord_L));
-mask_L = double(bw_L);
-mask_L(mask_L == 0) = nan;
+% Apply rotation to all vertices
+vertices_rotated_L = R_L * [x_L, y_L, z_L]';  % [3 x N]
+x_L_rot = vertices_rotated_L(1,:)';
+y_L_rot = vertices_rotated_L(2,:)';
+z_L_rot = vertices_rotated_L(3,:)';
 
-fprintf('  Mask coverage: %.1f%%\n', 100*sum(~isnan(mask_L(:)))/numel(mask_L));
+% Keep only valid (non-medial) vertices for interpolation
+validIdx_L = ~medialIdx_L;
+x_L_valid = x_L_rot(validIdx_L);
+y_L_valid = y_L_rot(validIdx_L);
+z_L_valid = z_L_rot(validIdx_L);
+sig_L_valid = sig_L(:, validIdx_L);
+fprintf('  Valid vertices: %d\n', sum(validIdx_L));
 
-% Interpolate data onto grid
-[xGrid_L, yGrid_L] = meshgrid(xCord_L, yCord_L);
+% Convert rotated xyz to azimuth/elevation
+azimuth_L = atan2d(y_L_valid, x_L_valid);
+elevation_L = atan2d(z_L_valid, sqrt(x_L_valid.^2 + y_L_valid.^2));
+
+% Interpolate onto grid
+[azGrid_L, elGrid_L] = meshgrid(azimuth_range, elevation_range);
 nTimepoints = size(sig_L, 1);
-data_grid_L = zeros(length(yCord_L), length(xCord_L), nTimepoints);
+data_grid_L = zeros(length(elevation_range), length(azimuth_range), nTimepoints);
 
 fprintf('  Interpolating %d timepoints...\n', nTimepoints);
 for t = 1:nTimepoints
-    interpData = griddata(x_L, y_L, sig_L(t,:)', xGrid_L, yGrid_L, 'linear');
-    data_grid_L(:,:,t) = interpData .* mask_L;
-
+    F = scatteredInterpolant(azimuth_L, elevation_L, sig_L_valid(t,:)', 'linear', 'none');
+    data_grid_L(:,:,t) = F(azGrid_L, elGrid_L);
     if mod(t, 50) == 0
         fprintf('    %d/%d\n', t, nTimepoints);
     end
@@ -75,45 +85,51 @@ end
 %% 4. PROCESS RIGHT HEMISPHERE
 fprintf('\nProcessing right hemisphere...\n');
 
-% Extract positions
 x_R = double(surf_R.vertices(:,1));
 y_R = double(surf_R.vertices(:,2));
-
-% Get cortical timeseries data for right hemisphere
+z_R = double(surf_R.vertices(:,3));
 sig_R = data.dtseries(length(surf_L.vertices)+1:length(surf_L.vertices)+length(x_R), :)';
 
-% Remove NaN vertices
-validIdx_R = ~all(isnan(sig_R), 1);
-x_R = x_R(validIdx_R);
-y_R = y_R(validIdx_R);
-sig_R = sig_R(:, validIdx_R);
+% Identify medial wall
+medialIdx_R = all(isnan(sig_R), 1);
+fprintf('  Medial wall vertices: %d\n', sum(medialIdx_R));
 
-fprintf('  Valid vertices: %d\n', length(x_R));
+% Find mean direction and rotate to north pole
+medial_dir_R = [mean(x_R(medialIdx_R)); mean(y_R(medialIdx_R)); mean(z_R(medialIdx_R))];
+medial_dir_R = medial_dir_R / norm(medial_dir_R);
+fprintf('  Medial wall direction: [%.3f, %.3f, %.3f]\n', medial_dir_R);
 
-% Create alpha shape boundary
-k_R = alphaShape(x_R, y_R, 4);
-[~, boundary_R] = k_R.boundaryFacets();
+rotation_axis_R = cross(medial_dir_R, north_pole);
+rotation_axis_R = rotation_axis_R / norm(rotation_axis_R);
+rotation_angle_R = acos(dot(medial_dir_R, north_pole));
 
-% Create mask
-boundary_R_x_idx = (boundary_R(:,1) - min(xCord_R)) / downsample + 1;
-boundary_R_y_idx = (boundary_R(:,2) - min(yCord_R)) / downsample + 1;
+K_R = [0, -rotation_axis_R(3), rotation_axis_R(2);
+       rotation_axis_R(3), 0, -rotation_axis_R(1);
+       -rotation_axis_R(2), rotation_axis_R(1), 0];
+R_R = eye(3) + sin(rotation_angle_R)*K_R + (1-cos(rotation_angle_R))*(K_R*K_R);
 
-bw_R = poly2mask(boundary_R_x_idx, boundary_R_y_idx, ...
-                 length(yCord_R), length(xCord_R));
-mask_R = double(bw_R);
-mask_R(mask_R == 0) = nan;
+vertices_rotated_R = R_R * [x_R, y_R, z_R]';
+x_R_rot = vertices_rotated_R(1,:)';
+y_R_rot = vertices_rotated_R(2,:)';
+z_R_rot = vertices_rotated_R(3,:)';
 
-fprintf('  Mask coverage: %.1f%%\n', 100*sum(~isnan(mask_R(:)))/numel(mask_R));
+validIdx_R = ~medialIdx_R;
+x_R_valid = x_R_rot(validIdx_R);
+y_R_valid = y_R_rot(validIdx_R);
+z_R_valid = z_R_rot(validIdx_R);
+sig_R_valid = sig_R(:, validIdx_R);
+fprintf('  Valid vertices: %d\n', sum(validIdx_R));
 
-% Interpolate data onto grid
-[xGrid_R, yGrid_R] = meshgrid(xCord_R, yCord_R);
-data_grid_R = zeros(length(yCord_R), length(xCord_R), nTimepoints);
+azimuth_R = atan2d(y_R_valid, x_R_valid);
+elevation_R = atan2d(z_R_valid, sqrt(x_R_valid.^2 + y_R_valid.^2));
+
+[azGrid_R, elGrid_R] = meshgrid(azimuth_range, elevation_range);
+data_grid_R = zeros(length(elevation_range), length(azimuth_range), nTimepoints);
 
 fprintf('  Interpolating %d timepoints...\n', nTimepoints);
 for t = 1:nTimepoints
-    interpData = griddata(x_R, y_R, sig_R(t,:)', xGrid_R, yGrid_R, 'linear');
-    data_grid_R(:,:,t) = interpData .* mask_R;
-
+    F = scatteredInterpolant(azimuth_R, elevation_R, sig_R_valid(t,:)', 'linear', 'none');
+    data_grid_R(:,:,t) = F(azGrid_R, elGrid_R);
     if mod(t, 50) == 0
         fprintf('    %d/%d\n', t, nTimepoints);
     end
@@ -122,17 +138,17 @@ end
 %% 5. VISUALIZE
 fprintf('\nPlotting...\n');
 
-timepoint = 1;
-figure('Position', [100, 100, 1400, 600]);
-
+timepoint = 6;
 clims = [-60, 60];
 
+figure('Position', [100, 100, 1400, 600]);
 subplot(1,2,1);
 imagesc(data_grid_L(:,:,timepoint));
 colormap(jet(256));
 caxis(clims);
 colorbar;
-axis off; axis equal tight;
+xlabel('Azimuth index');
+ylabel('Elevation index');
 title(sprintf('Left Hemisphere - t=%d', timepoint));
 
 subplot(1,2,2);
@@ -140,30 +156,14 @@ imagesc(data_grid_R(:,:,timepoint));
 colormap(jet(256));
 caxis(clims);
 colorbar;
-axis off; axis equal tight;
+xlabel('Azimuth index');
+ylabel('Elevation index');
 title(sprintf('Right Hemisphere - t=%d', timepoint));
 
-sgtitle('Flatmap Projection', 'FontSize', 16);
-
-% Plot masks
-figure('Position', [100, 100, 1400, 600]);
-subplot(1,2,1);
-imagesc(mask_L);
-title('Left Mask');
-colorbar;
-axis off; axis equal tight;
-
-subplot(1,2,2);
-imagesc(mask_R);
-title('Right Mask');
-colorbar;
-axis off; axis equal tight;
-
-sgtitle('Cortex Masks', 'FontSize', 16);
+sgtitle('Spherical Projection (Medial Wall at Pole)', 'FontSize', 16);
 
 % Plot temporal mean
 figure('Position', [100, 100, 1400, 600]);
-
 mean_L = mean(data_grid_L, 3, 'omitnan');
 mean_R = mean(data_grid_R, 3, 'omitnan');
 clims_mean = [min([mean_L(:); mean_R(:)], [], 'omitnan'), max([mean_L(:); mean_R(:)], [], 'omitnan')];
@@ -173,7 +173,8 @@ imagesc(mean_L);
 colormap(hot(256));
 caxis(clims_mean);
 colorbar;
-axis off; axis equal tight;
+xlabel('Azimuth index');
+ylabel('Elevation index');
 title('Left - Temporal Mean');
 
 subplot(1,2,2);
@@ -181,16 +182,16 @@ imagesc(mean_R);
 colormap(hot(256));
 caxis(clims_mean);
 colorbar;
-axis off; axis equal tight;
+xlabel('Azimuth index');
+ylabel('Elevation index');
 title('Right - Temporal Mean');
 
 sgtitle('Temporal Mean Activity', 'FontSize', 16);
 
-%% 6. SAVE GRID DATA
+%% 6. SAVE
 fprintf('\nSaving results...\n');
-save('flatmap_projection_results.mat', 'data_grid_L', 'data_grid_R', ...
-     'mask_L', 'mask_R', 'xCord_L', 'yCord_L', 'xCord_R', 'yCord_R', ...
-     'nTimepoints');
+save('spherical_projection_rotated.mat', 'data_grid_L', 'data_grid_R', ...
+     'azimuth_range', 'elevation_range', 'nTimepoints');
 
 fprintf('\nDone!\n');
 fprintf('Output dimensions:\n');
@@ -199,104 +200,83 @@ fprintf('  Right: [%d x %d x %d]\n', size(data_grid_R));
 
 
 %% 7. MAP GRID BOUNDARIES BACK TO GIFTI SURFACE
-% The grid boundaries are the edges of the resampling rectangle in flatmap
-% 2D space. The flatmap vertices live in the same 2D coordinate system.
-% So we just need to find which flatmap vertices are near the edges of
-% the grid rectangle, then write those labels out as a func.gii that can
-% be loaded onto the native (inflated/pial) surface for visualization.
 %
-% Boundary labels:
+% The grid edges in the image correspond to lines of constant azimuth or
+% elevation in the rotated spherical frame. To project these back to the
+% original sphere, we compute azimuth/elevation for ALL vertices in the
+% rotated frame and mark those near the grid edges.
+%
+% Key geometry facts for equirectangular sphere projection:
+%   - az=-180 and az=+180 are the SAME meridian (azimuth wraps around).
+%     So left/right image edges map to one line on the brain.
+%   - el=+90 is the north pole (medial wall after rotation).
+%   - el=-90 is the south pole (a single point, not a line).
+%     Near the south pole, ALL azimuths converge, so "bottom edge"
+%     is a small cap rather than a line.
+%
+% Boundary labels (bitmask for overlap at corners/intersections):
 %   0 = not on any boundary
-%   1 = left edge   (x = min of xCord)
-%   2 = right edge  (x = max of xCord)
-%   3 = bottom edge (y = min of yCord)
-%   4 = top edge    (y = max of yCord)
+%   1 = azimuth seam (az near +/-180, i.e. left/right image edges)
+%   2 = south pole cap (el near -90, i.e. bottom image edge)
+%   4 = north pole cap / medial wall border (el near +90, i.e. top edge)
+%
+% To visualize: load the .func.gii onto the inflated or pial surface
+% (same 32k mesh) in wb_view. Threshold to show values > 0.
 
 fprintf('\nMapping grid boundaries back to surface...\n');
 
-% Distance threshold in flatmap units. The grid spacing is `downsample`
-% units, so marking vertices within one grid cell of the boundary edge
-% is a reasonable choice. Adjust if lines are too thick or too thin.
-edge_threshold = downsample;
+% Threshold in degrees. Controls how thick the boundary lines appear.
+% Larger = thicker lines, more vertices marked. Start with downsample
+% value (one grid cell width in degrees).
+edge_threshold_deg = downsample;
 
-%% LEFT HEMISPHERE
+%% LEFT HEMISPHERE BOUNDARIES
 fprintf('Processing left hemisphere boundaries...\n');
 
-% Get ALL flatmap vertex positions (including medial wall)
-x_L_all = double(surf_L.vertices(:,1));
-y_L_all = double(surf_L.vertices(:,2));
-nVerts_L = length(x_L_all);
+% Compute azimuth/elevation for ALL left vertices in the rotated frame
+% (R_L and rotated coordinates already computed in Part 1)
+az_all_L = atan2d(y_L_rot, x_L_rot);
+el_all_L = atan2d(z_L_rot, sqrt(x_L_rot.^2 + y_L_rot.^2));
 
-% Grid rectangle edges for the left hemisphere
-xmin_L = min(xCord_L);
-xmax_L = max(xCord_L);
-ymin_L = min(yCord_L);
-ymax_L = max(yCord_L);
+boundary_labels_L = zeros(length(x_L), 1);
 
-% Initialize boundary labels (0 = no boundary)
-boundary_labels_L = zeros(nVerts_L, 1);
+% Azimuth seam: |az| near 180 — the single meridian where the image wraps.
+% This is where the left and right edges of your grid image meet on the
+% sphere. Use wrapped distance: min(|az - 180|, |az + 180|) = 180 - |az|.
+near_az_seam_L = (180 - abs(az_all_L)) < edge_threshold_deg;
+boundary_labels_L(near_az_seam_L) = 1;
 
-% Only label vertices that are inside the grid rectangle (plus threshold),
-% so we don't mark distant medial wall vertices that happen to share an
-% x or y coordinate with a boundary edge.
-inside_x_L = (x_L_all >= xmin_L - edge_threshold) & (x_L_all <= xmax_L + edge_threshold);
-inside_y_L = (y_L_all >= ymin_L - edge_threshold) & (y_L_all <= ymax_L + edge_threshold);
-inside_rect_L = inside_x_L & inside_y_L;
+% South pole cap: el near -90.
+near_south_L = (el_all_L - (-90)) < edge_threshold_deg;
+boundary_labels_L(near_south_L) = boundary_labels_L(near_south_L) + 2;
 
-% Left edge: vertices near x = xmin, within the y range of the grid
-near_left_L  = abs(x_L_all - xmin_L) < edge_threshold & inside_y_L;
-% Right edge: vertices near x = xmax, within the y range
-near_right_L = abs(x_L_all - xmax_L) < edge_threshold & inside_y_L;
-% Bottom edge: vertices near y = ymin, within the x range
-near_bot_L   = abs(y_L_all - ymin_L) < edge_threshold & inside_x_L;
-% Top edge: vertices near y = ymax, within the x range
-near_top_L   = abs(y_L_all - ymax_L) < edge_threshold & inside_x_L;
+% North pole / medial wall border: el near +90.
+near_north_L = (90 - el_all_L) < edge_threshold_deg;
+boundary_labels_L(near_north_L) = boundary_labels_L(near_north_L) + 4;
 
-% Assign labels (later labels don't overwrite earlier ones at corners)
-boundary_labels_L(near_left_L)  = 1;
-boundary_labels_L(near_right_L & boundary_labels_L == 0) = 2;
-boundary_labels_L(near_bot_L   & boundary_labels_L == 0) = 3;
-boundary_labels_L(near_top_L   & boundary_labels_L == 0) = 4;
+fprintf('  Edge threshold: %.1f degrees\n', edge_threshold_deg);
+fprintf('  Boundary counts: az_seam=%d, south_pole=%d, north_pole/medial=%d\n', ...
+        sum(near_az_seam_L), sum(near_south_L), sum(near_north_L));
 
-fprintf('  Grid rectangle: x=[%.0f, %.0f], y=[%.0f, %.0f]\n', ...
-        xmin_L, xmax_L, ymin_L, ymax_L);
-fprintf('  Edge threshold: %.1f flatmap units\n', edge_threshold);
-fprintf('  Boundary vertex counts: left=%d, right=%d, bottom=%d, top=%d\n', ...
-        sum(boundary_labels_L==1), sum(boundary_labels_L==2), ...
-        sum(boundary_labels_L==3), sum(boundary_labels_L==4));
-
-%% RIGHT HEMISPHERE
+%% RIGHT HEMISPHERE BOUNDARIES
 fprintf('Processing right hemisphere boundaries...\n');
 
-x_R_all = double(surf_R.vertices(:,1));
-y_R_all = double(surf_R.vertices(:,2));
-nVerts_R = length(x_R_all);
+az_all_R = atan2d(y_R_rot, x_R_rot);
+el_all_R = atan2d(z_R_rot, sqrt(x_R_rot.^2 + y_R_rot.^2));
 
-xmin_R = min(xCord_R);
-xmax_R = max(xCord_R);
-ymin_R = min(yCord_R);
-ymax_R = max(yCord_R);
+boundary_labels_R = zeros(length(x_R), 1);
 
-boundary_labels_R = zeros(nVerts_R, 1);
+near_az_seam_R = (180 - abs(az_all_R)) < edge_threshold_deg;
+boundary_labels_R(near_az_seam_R) = 1;
 
-inside_x_R = (x_R_all >= xmin_R - edge_threshold) & (x_R_all <= xmax_R + edge_threshold);
-inside_y_R = (y_R_all >= ymin_R - edge_threshold) & (y_R_all <= ymax_R + edge_threshold);
+near_south_R = (el_all_R - (-90)) < edge_threshold_deg;
+boundary_labels_R(near_south_R) = boundary_labels_R(near_south_R) + 2;
 
-near_left_R  = abs(x_R_all - xmin_R) < edge_threshold & inside_y_R;
-near_right_R = abs(x_R_all - xmax_R) < edge_threshold & inside_y_R;
-near_bot_R   = abs(y_R_all - ymin_R) < edge_threshold & inside_x_R;
-near_top_R   = abs(y_R_all - ymax_R) < edge_threshold & inside_x_R;
+near_north_R = (90 - el_all_R) < edge_threshold_deg;
+boundary_labels_R(near_north_R) = boundary_labels_R(near_north_R) + 4;
 
-boundary_labels_R(near_left_R)  = 1;
-boundary_labels_R(near_right_R & boundary_labels_R == 0) = 2;
-boundary_labels_R(near_bot_R   & boundary_labels_R == 0) = 3;
-boundary_labels_R(near_top_R   & boundary_labels_R == 0) = 4;
-
-fprintf('  Grid rectangle: x=[%.0f, %.0f], y=[%.0f, %.0f]\n', ...
-        xmin_R, xmax_R, ymin_R, ymax_R);
-fprintf('  Boundary vertex counts: left=%d, right=%d, bottom=%d, top=%d\n', ...
-        sum(boundary_labels_R==1), sum(boundary_labels_R==2), ...
-        sum(boundary_labels_R==3), sum(boundary_labels_R==4));
+fprintf('  Boundary counts: az_seam=%d, south_pole=%d, north_pole/medial=%d\n', ...
+        sum(near_az_seam_R), sum(near_south_R), sum(near_north_R));
 
 %% SAVE BOUNDARY GIFTI FILES
 fprintf('\nSaving boundary gifti files...\n');
@@ -312,10 +292,12 @@ save(g_R, 'E:\Downloads\right_hemisphere_grid_boundaries.func.gii');
 fprintf('Saved:\n');
 fprintf('  E:\\Downloads\\left_hemisphere_grid_boundaries.func.gii\n');
 fprintf('  E:\\Downloads\\right_hemisphere_grid_boundaries.func.gii\n');
-fprintf('\nBoundary labels:\n');
+fprintf('\nBoundary labels (bitmask):\n');
 fprintf('  0 = not on boundary\n');
-fprintf('  1 = left edge   (x = %d)\n', xmin_L);
-fprintf('  2 = right edge  (x = %d)\n', xmax_L);
-fprintf('  3 = bottom edge (y = %d)\n', ymin_L);
-fprintf('  4 = top edge    (y = %d)\n', ymax_L);
-fprintf('\nVisualize by loading .func.gii onto inflated or pial surface in wb_view.\n');
+fprintf('  1 = azimuth seam (left/right image edges, az = +/-180)\n');
+fprintf('  2 = south pole cap (bottom image edge, el = -90)\n');
+fprintf('  4 = north pole / medial wall border (top image edge, el = +90)\n');
+fprintf('  3 = azimuth seam + south pole overlap\n');
+fprintf('  5 = azimuth seam + north pole overlap\n');
+fprintf('\nVisualize: load .func.gii onto inflated/pial surface in wb_view.\n');
+fprintf('Adjust edge_threshold_deg (currently %.1f) for thicker/thinner lines.\n', edge_threshold_deg);
